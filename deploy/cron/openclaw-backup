@@ -1,0 +1,3 @@
+SHELL=/bin/bash
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+15 4 * * * root /usr/local/sbin/openclaw-backup.sh

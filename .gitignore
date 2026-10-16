@@ -1,0 +1,4 @@
+plans/
+credentials/
+*.env
+*.key

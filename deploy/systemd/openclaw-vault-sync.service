@@ -1,0 +1,9 @@
+[Unit]
+Description=Sync OpenClaw vault to Dropbox
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=openclaw
+EnvironmentFile=/etc/openclaw/vault-sync.env
+ExecStart=/usr/bin/rclone sync /home/openclaw/vault "dropbox:${DROPBOX_DEST}" --exclude-from /home/openclaw/.config/rclone/vault-exclude.txt

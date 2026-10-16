@@ -1,0 +1,16 @@
+# Конфиг /var/lib/sota-connect/singbox.json со стеком tun gvisor
+# кладётся на сервер вручную и в git не входит.
+[Unit]
+Description=Sota tunnel via sing-box
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/sbin/sota-preserve-ssh.sh
+ExecStart=/usr/libexec/sota-daemon/sing-box run -c /var/lib/sota-connect/singbox.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
