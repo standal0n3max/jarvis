@@ -2,3 +2,5 @@ plans/
 credentials/
 *.env
 *.key
+local.md
+agent/private/
