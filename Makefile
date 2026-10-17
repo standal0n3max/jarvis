@@ -10,7 +10,7 @@ help:
 		'make check-index           то же по индексу, после git add и до commit' \
 		'make deploy               с ПК: выкладка на VPS и update.sh' \
 		'                           HOST=ssh-хост, по умолчанию $(HOST)' \
-		'make update               на VPS: правила, календарь, unit-файлы' \
+		'make update               на VPS: правила, календарь, таблица, unit-файлы' \
 		'make install ENV=файл     на VPS: первая установка' \
 		'make morning ENV=файл     на VPS: утренняя сводка в 08:00'
 

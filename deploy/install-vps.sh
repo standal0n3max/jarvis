@@ -18,6 +18,7 @@ echo "Ручные шаги. Пока их нет, скрипт ставит т�
 echo "  Sota: /var/lib/sota-connect/singbox.json (mode 600), стек tun gvisor. В git этот файл не входит."
 echo "  Dropbox: rclone remote с именем dropbox у пользователя openclaw"
 echo "  Google Calendar: node /home/openclaw/.openclaw/calendar-v3-mcp.mjs login"
+echo "  Google Sheets: ключ /home/openclaw/.openclaw/google-sheets.json и google-sheets.env, оба mode 600"
 
 if [[ -z "${ENV_FILE}" || ! -f "${ENV_FILE}" ]]; then
   echo "СТОП: передайте env-файл по образцу deploy/env.example" >&2
@@ -103,6 +104,7 @@ fi
 install -d -m 700 -o openclaw -g openclaw /home/openclaw/.openclaw
 install -m 600 -o openclaw -g openclaw "${ENV_FILE}" /home/openclaw/.openclaw/.env
 install -m 644 -o openclaw -g openclaw "${ROOT}/deploy/calendar-v3-mcp.mjs" /home/openclaw/.openclaw/calendar-v3-mcp.mjs
+install -m 644 -o openclaw -g openclaw "${ROOT}/deploy/sheets-mcp.mjs" /home/openclaw/.openclaw/sheets-mcp.mjs
 
 umask 077
 google_env="$(mktemp)"
