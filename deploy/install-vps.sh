@@ -87,6 +87,8 @@ if ! swapon --show | grep -q .; then
   swapon /swapfile
   grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
+sysctl -w vm.swappiness=10 >/dev/null
+printf 'vm.swappiness=10\n' > /etc/sysctl.d/99-swappiness.conf
 
 if ! command -v openclaw >/dev/null 2>&1; then
   curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install-cli.sh \

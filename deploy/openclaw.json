@@ -36,6 +36,10 @@
         "primary": "openrouter/anthropic/claude-haiku-5.5"
       },
       "thinkingDefault": "low",
+      "heartbeat": {
+        "every": "0m",
+        "target": "none"
+      },
       "imageModel": {
         "primary": "openrouter/anthropic/claude-sonnet-5.5"
       }
