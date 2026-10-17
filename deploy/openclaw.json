@@ -145,6 +145,10 @@
       "calendar-v3": {
         "command": "/usr/bin/node",
         "args": ["/home/openclaw/.openclaw/calendar-v3-mcp.mjs"]
+      },
+      "sheets": {
+        "command": "/usr/bin/node",
+        "args": ["/home/openclaw/.openclaw/sheets-mcp.mjs"]
       }
     }
   }

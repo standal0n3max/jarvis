@@ -1,5 +1,5 @@
 #!/bin/bash
-# Уже работающий VPS: правила агента, скрипт календаря и unit-файлы.
+# Уже работающий VPS: правила агента, скрипты календаря и таблицы, unit-файлы.
 # Ubuntu не переустанавливает. Секреты и openclaw.json не перезаписывает.
 # local.md не копирует и не удаляет. USER.md пишет только если файла ещё нет.
 # Запуск: sudo ./deploy/update.sh
@@ -42,6 +42,7 @@ write_vault_version "${ROOT}"
 
 install -d -m 700 -o openclaw -g openclaw /home/openclaw/.openclaw
 install -m 644 -o openclaw -g openclaw "${ROOT}/deploy/calendar-v3-mcp.mjs" /home/openclaw/.openclaw/calendar-v3-mcp.mjs
+install -m 644 -o openclaw -g openclaw "${ROOT}/deploy/sheets-mcp.mjs" /home/openclaw/.openclaw/sheets-mcp.mjs
 
 install -m 644 "${ROOT}/deploy/systemd/sota-tun.service" /etc/systemd/system/sota-tun.service
 install -m 755 "${ROOT}/deploy/sbin/sota-preserve-ssh.sh" /usr/local/sbin/sota-preserve-ssh.sh
