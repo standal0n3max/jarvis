@@ -18,6 +18,7 @@ flowchart LR
   cloud[Облако]
   obsidian[Obsidian]
   gcal[Google Calendar]
+  sheets[Google Sheets]
 
   phone --> vps
   vps --> egress
@@ -26,11 +27,14 @@ flowchart LR
   vault --> cloud
   cloud --> obsidian
   vps --> gcal
+  vps --> sheets
 ```
 
 OpenClaw слушает Telegram и пишет в `/home/openclaw/vault`. Модели идут через OpenRouter: обычный текст — Claude Haiku, фото чека и утренняя сводка — Claude Sonnet, голос — Whisper. Для Claude включены `data_collection: deny`, порядок провайдера `anthropic` и выключенные fallback. Инструменты `exec` и `browser` выключены: бот меняет заметки файловыми инструментами, не командами оболочки.
 
 Календарь — локальный скрипт `calendar-v3-mcp.mjs` к Google Calendar API v3. Официальный Calendar MCP в конфиге выключен: для личного Gmail он закрыт программой Developer Preview.
+
+Таблица бюджета — локальный скрипт `sheets-mcp.mjs`. Та же трата, что легла в `finance/YYYY/`, дописывается строкой на лист Daily. Вопрос «сколько осталось на неделю» читает лист Notify. «Сколько потратил вчера» по-прежнему считается по файлам vault.
 
 Выход в сеть на этом VPS — Sota, sing-box со стеком `gvisor`. Это личный выбор владельца, а не часть ассистента. Достаточно любого пути, с которого с сервера открываются Telegram и OpenRouter. В репозитории лежат unit `sota-tun` и `deploy/sbin/sota-preserve-ssh.sh`: перед туннелем скрипт оставляет ответы SSH в таблице `main`. Сам конфиг sing-box на сервере, в git его нет.
 
@@ -87,7 +91,7 @@ vault/
 
 ## Как говорить с ботом
 
-Коротко и по одному делу. «Кофе 350 нал сегодня». «Купить молоко до начала ноября». «Поставь встречу на завтра в 15:00». «Сколько я потратил вчера».
+Коротко и по одному делу. «Кофе 350 нал сегодня». «Купить молоко до начала ноября». «Поставь встречу на завтра в 15:00». «Сколько я потратил вчера». «Сколько осталось на неделю».
 
 Когда дело закрыто — трата лежит в файле, встреча стоит, вопрос отвечен — отправь отдельным сообщением `/reset`. Так следующая задача не унаследует старый контекст: чужую сумму, вчерашнюю дату или прежний отказ инструмента. Команда одна, без продолжения в той же строке. Новое дело — следующим сообщением.
 
@@ -126,7 +130,7 @@ make update
 make morning ENV=/путь/к/env-файлу
 ```
 
-`make update` обновляет правила, скрипт календаря и unit-файлы. Ubuntu заново не ставит. Секреты, живой `openclaw.json` и `local.md` не перезаписывает. `USER.md` копирует только если файла ещё нет. Пока на сервере нет `system/local.md`, обновление останавливается.
+`make update` обновляет правила, скрипты календаря и таблицы, unit-файлы. Ubuntu заново не ставит. Секреты, живой `openclaw.json` и `local.md` не перезаписывает. `USER.md` копирует только если файла ещё нет. Пока на сервере нет `system/local.md`, обновление останавливается. Сервер `sheets` в живой `openclaw.json` добавляется отдельно, затем `systemctl --user restart openclaw-gateway.service` от пользователя `openclaw`.
 
 Первая установка нового сервера — `make install ENV=/путь/к/env-файлу`. Текущий уже работающий VPS этим не ставить.
 
@@ -138,17 +142,19 @@ make morning ENV=/путь/к/env-файлу
 - `local.md`, `agent/private/`, `deploy/personal-denylist.txt`
 - vault
 - `calendar-v3.json` — refresh token календаря
+- `google-sheets.json` и `google-sheets.env` — ключ сервисного аккаунта и id копии таблицы
 - `rclone.conf` — токен облака
 - `/var/lib/sota-connect/singbox.json` — ключи туннеля
 
-Пример ключей без значений: `deploy/env.example`. Там `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_ID`, `DROPBOX_DEST`, `GOOGLE_CALENDAR_CLIENT_ID` и `GOOGLE_CALENDAR_CLIENT_SECRET`.
+Пример ключей без значений: `deploy/env.example`. Там `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_ID`, `DROPBOX_DEST`, `GOOGLE_CALENDAR_CLIENT_ID` и `GOOGLE_CALENDAR_CLIENT_SECRET`. Id копии таблицы — `GOOGLE_SHEETS_SPREADSHEET_ID` в `google-sheets.env`, этот файл на сервер кладётся вручную.
 
 `make check` ловит в публичных файлах почту, IPv4, `tg:` с длинным числом и пути облака. Свой список строк — `deploy/personal-denylist.txt`, сам файл в git не входит.
 
-## Три ручных шага
+## Ручные шаги
 
 Пока их нет, установщик ставит базу и останавливается.
 
 1. Выход в сеть, с которого открываются Telegram и OpenRouter. На этом сервере это Sota: конфиг sing-box в `/var/lib/sota-connect/singbox.json`, mode `600`. В git файла нет.
 2. rclone. У пользователя `openclaw` remote с именем `dropbox`.
 3. Календарь. `node /home/openclaw/.openclaw/calendar-v3-mcp.mjs login`. Refresh token ляжет в `~/.openclaw/calendar-v3.json`.
+4. Таблица. Ключ сервисного аккаунта в `/home/openclaw/.openclaw/google-sheets.json`, id копии в `/home/openclaw/.openclaw/google-sheets.env`. Оба файла mode `600`. `update.sh` их не копирует и живой `openclaw.json` не правит.
