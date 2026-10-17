@@ -1,6 +1,7 @@
 #!/bin/bash
 # Уже работающий VPS: правила агента, скрипт календаря и unit-файлы.
 # Ubuntu не переустанавливает. Секреты и openclaw.json не перезаписывает.
+# local.md не копирует и не удаляет. USER.md пишет только если файла ещё нет.
 # Запуск: sudo ./deploy/update.sh
 set -euo pipefail
 
@@ -16,6 +17,16 @@ if ! id openclaw >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ ! -f /home/openclaw/vault/system/local.md ]]; then
+  echo "СТОП: нет /home/openclaw/vault/system/local.md" >&2
+  echo "Сначала перенесите личные папки из живого AGENTS.md в этот файл." >&2
+  echo "update.sh его не создаёт и не перезаписывает." >&2
+  exit 2
+fi
+
+# shellcheck source=lib/write-version.sh
+source "${ROOT}/deploy/lib/write-version.sh"
+
 install -d -m 755 -o openclaw -g openclaw \
   /home/openclaw/vault/system \
   /home/openclaw/vault/skills/expense-tracker \
@@ -27,6 +38,7 @@ fi
 install -m 644 -o openclaw -g openclaw "${ROOT}/agent/system/AGENTS.md" /home/openclaw/vault/system/AGENTS.md
 install -m 644 -o openclaw -g openclaw "${ROOT}/agent/skills/expense-tracker/SKILL.md" /home/openclaw/vault/skills/expense-tracker/SKILL.md
 install -m 644 -o openclaw -g openclaw "${ROOT}/agent/skills/obsidian-tasks/SKILL.md" /home/openclaw/vault/skills/obsidian-tasks/SKILL.md
+write_vault_version "${ROOT}"
 
 install -d -m 700 -o openclaw -g openclaw /home/openclaw/.openclaw
 install -m 644 -o openclaw -g openclaw "${ROOT}/deploy/calendar-v3-mcp.mjs" /home/openclaw/.openclaw/calendar-v3-mcp.mjs
@@ -47,4 +59,4 @@ fi
 systemctl daemon-reload
 systemctl try-restart sota-tun.service || true
 systemctl try-restart openclaw-vault-sync.timer || true
-echo "Готово. Секреты, openclaw.json и токены не менялись."
+echo "Готово. Секреты, openclaw.json, токены и local.md не менялись."

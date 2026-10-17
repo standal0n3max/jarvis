@@ -188,6 +188,10 @@ rm -f "${user_md}"
 install -m 644 -o openclaw -g openclaw "${ROOT}/agent/system/AGENTS.md" /home/openclaw/vault/system/AGENTS.md
 install -m 644 -o openclaw -g openclaw "${ROOT}/agent/skills/expense-tracker/SKILL.md" /home/openclaw/vault/skills/expense-tracker/SKILL.md
 install -m 644 -o openclaw -g openclaw "${ROOT}/agent/skills/obsidian-tasks/SKILL.md" /home/openclaw/vault/skills/obsidian-tasks/SKILL.md
+# local.md.example на сервер не копируется. local.md создаёт владелец, скрипт его не трогает.
+# shellcheck source=lib/write-version.sh
+source "${ROOT}/deploy/lib/write-version.sh"
+write_vault_version "${ROOT}"
 
 install -d -m 700 -o openclaw -g openclaw /home/openclaw/.config/rclone
 install -m 600 -o openclaw -g openclaw "${ROOT}/deploy/rclone/vault-exclude.txt" /home/openclaw/.config/rclone/vault-exclude.txt
