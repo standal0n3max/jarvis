@@ -1,14 +1,15 @@
 #!/usr/bin/env node
-// Локальный MCP: запись траты в Google Sheets и чтение остатка недели.
+// Локальный MCP: запись траты в Google Sheets, чтение Daily и Monthly, остаток недели.
 // Секреты читает с диска и в stdout не пишет. stdout — только JSON-RPC.
 import readline from "node:readline"
 import { createSign } from "node:crypto"
 import { readFileSync } from "node:fs"
+import { pathToFileURL } from "node:url"
 
 const KEY_FILE = "/home/openclaw/.openclaw/google-sheets.json"
 const ENV_FILE = "/home/openclaw/.openclaw/google-sheets.env"
 const SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-const MONTHS = new Set([
+const MONTH_NAMES = [
   "Январь",
   "Февраль",
   "Март",
@@ -21,7 +22,42 @@ const MONTHS = new Set([
   "Октябрь",
   "Ноябрь",
   "Декабрь",
-])
+]
+const MONTHS = new Set(MONTH_NAMES)
+const MONTHLY_RANGE = "Monthly!A1:Z301"
+const MONTHLY_ROW_CAP = 300
+const MONTHLY_KINDS = new Set(["category", "month", "total", "year"])
+const MONTHLY_FIELD_ORDER = ["category", "month", "plan", "fact", "left"]
+const MONTHLY_FIELDS = {
+  category: ["категория", "category"],
+  month: ["месяц", "month"],
+  plan: ["план", "plan", "бюджет", "лимит"],
+  fact: ["факт", "fact", "потрачено", "расход"],
+  left: ["остаток", "осталось", "разница"],
+}
+const DAILY_RANGE = "Daily!A1:Z5001"
+const DAILY_DATA_CAP = 5000
+const QUERY_LIMIT = 200
+const FIELD_LABELS = {
+  date: "дата",
+  category: "категория",
+  type: "тип",
+  amount: "сумма",
+  item: "трата",
+  month: "месяц",
+  week: "неделя",
+}
+const FIELD_ALIASES = {
+  date: ["дата", "date"],
+  category: ["категория", "category"],
+  type: ["тип", "type"],
+  amount: ["сумма", "цена", "price", "amount", "стоимость"],
+  item: ["трата", "название", "имя", "item", "описание"],
+  month: ["месяц", "month"],
+  week: ["неделя", "week"],
+}
+const FIELD_ORDER = ["date", "category", "type", "amount", "item", "month", "week"]
+const GROUP_FIELDS = new Set(["category", "type", "month", "week"])
 
 function readEnvFile(path) {
   const values = {}
@@ -184,9 +220,645 @@ async function appendExpense(args) {
   }
 }
 
-function serialToIso(serial) {
+export function serialToIso(serial) {
   const epoch = Date.UTC(1899, 11, 30)
   return new Date(epoch + serial * 86400000).toISOString().slice(0, 10)
+}
+
+function normalizeHeader(value) {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, " ")
+}
+
+function sameText(left, right) {
+  return String(left).trim().localeCompare(String(right).trim(), "ru", { sensitivity: "accent" }) === 0
+}
+
+function headerMatches(header, alias) {
+  const name = normalizeHeader(header)
+  return name === alias || name.startsWith(`${alias} `) || name.startsWith(`${alias},`) || name.startsWith(`${alias}:`)
+}
+
+function fieldForHeader(header) {
+  for (const field of FIELD_ORDER) {
+    if (FIELD_ALIASES[field].some((alias) => headerMatches(header, alias))) {
+      return field
+    }
+  }
+  return null
+}
+
+function columnLetter(index) {
+  let number = index + 1
+  let letters = ""
+  while (number > 0) {
+    const remainder = (number - 1) % 26
+    letters = String.fromCharCode(65 + remainder) + letters
+    number = Math.floor((number - 1) / 26)
+  }
+  return letters
+}
+
+export function cellDateIso(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return serialToIso(value)
+  }
+  if (typeof value !== "string") {
+    return null
+  }
+  const trimmed = value.trim()
+  if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
+    return trimmed.slice(0, 10)
+  }
+  const dotted = trimmed.match(/^(\d{2})\.(\d{2})\.(\d{4})$/)
+  if (!dotted) {
+    return null
+  }
+  return `${dotted[3]}-${dotted[2]}-${dotted[1]}`
+}
+
+function cellAmount(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value
+  }
+  if (typeof value !== "string") {
+    return null
+  }
+  const cleaned = value.replace(/\s/g, "").replace("₽", "").replace(",", ".")
+  if (!cleaned) {
+    return null
+  }
+  const number = Number(cleaned)
+  return Number.isFinite(number) ? number : null
+}
+
+function displayValue(field, value) {
+  if (value === undefined || value === null || value === "") {
+    return null
+  }
+  if (field === "date") {
+    return cellDateIso(value)
+  }
+  if (field === "amount") {
+    return cellAmount(value)
+  }
+  return value
+}
+
+function looksLikeHeader(row) {
+  return (row || []).some((cell) => fieldForHeader(cell) !== null)
+}
+
+export function tableFromGrid(grid) {
+  const rows = grid || []
+  let headerIndex = 0
+  if (!looksLikeHeader(rows[0]) && looksLikeHeader(rows[1])) {
+    headerIndex = 1
+  }
+  const headerRow = rows[headerIndex] || []
+  const width = rows.reduce((max, row) => Math.max(max, (row || []).length), 0)
+  const columns = []
+  const usedFields = new Set()
+  for (let index = 0; index < width; index += 1) {
+    const raw = String(headerRow[index] || "").trim()
+    const header = raw || columnLetter(index)
+    let field = fieldForHeader(raw)
+    if (field && usedFields.has(field)) {
+      field = null
+    }
+    if (field) {
+      usedFields.add(field)
+    }
+    columns.push({ header, field })
+  }
+  const records = []
+  for (let index = headerIndex + 1; index < rows.length; index += 1) {
+    const source = rows[index] || []
+    if (source.every((cell) => cell === undefined || cell === null || String(cell).trim() === "")) {
+      continue
+    }
+    const record = { row: index + 1 }
+    const fields = {}
+    for (let column = 0; column < columns.length; column += 1) {
+      const shown = displayValue(columns[column].field, source[column])
+      if (shown === null) {
+        continue
+      }
+      record[columns[column].header] = shown
+      if (columns[column].field) {
+        fields[columns[column].field] = shown
+      }
+    }
+    records.push({ record, fields })
+  }
+  return {
+    columns,
+    headers: columns.map((column) => column.header),
+    records,
+    rangeCapped: rows.length >= DAILY_DATA_CAP + 1,
+  }
+}
+
+function optionalText(args, key) {
+  if (args[key] === undefined || args[key] === null || args[key] === "") {
+    return null
+  }
+  if (typeof args[key] !== "string") {
+    throw new Error(`${key} должен быть строкой`)
+  }
+  const value = args[key].trim()
+  return value || null
+}
+
+function columnByHeader(table, name) {
+  return table.columns.find((column) => sameText(column.header, name)) || null
+}
+
+function requireMappedField(table, field) {
+  if (table.columns.some((column) => column.field === field)) {
+    return
+  }
+  const label = FIELD_LABELS[field]
+  throw new Error(`на Daily нет колонки «${label}». Заголовки: ${table.headers.join(", ")}`)
+}
+
+export function filterDailyRecords(table, args) {
+  const dateFrom = optionalText(args, "date_from")
+  const dateTo = optionalText(args, "date_to")
+  if (dateFrom) {
+    parseDate(dateFrom)
+  }
+  if (dateTo) {
+    parseDate(dateTo)
+  }
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    throw new Error("date_from позже date_to")
+  }
+  const category = optionalText(args, "category")
+  const type = optionalText(args, "type")
+  const columnName = optionalText(args, "column")
+  const equals = optionalText(args, "equals")
+  if (columnName && !equals) {
+    throw new Error("вместе с column нужен equals")
+  }
+  if (equals && !columnName) {
+    throw new Error("вместе с equals нужен column")
+  }
+  if (dateFrom || dateTo) {
+    requireMappedField(table, "date")
+  }
+  if (category) {
+    requireMappedField(table, "category")
+  }
+  if (type) {
+    requireMappedField(table, "type")
+  }
+  const column = columnName ? columnByHeader(table, columnName) : null
+  if (columnName && !column) {
+    throw new Error(`на Daily нет колонки «${columnName}». Заголовки: ${table.headers.join(", ")}`)
+  }
+  return table.records.filter((entry) => {
+    const date = entry.fields.date || null
+    if (dateFrom && (!date || date < dateFrom)) {
+      return false
+    }
+    if (dateTo && (!date || date > dateTo)) {
+      return false
+    }
+    if (category && !sameText(entry.fields.category || "", category)) {
+      return false
+    }
+    if (type && !sameText(entry.fields.type || "", type)) {
+      return false
+    }
+    if (column) {
+      const value = entry.record[column.header]
+      if (value === undefined || !sameText(value, equals)) {
+        return false
+      }
+    }
+    return true
+  })
+}
+
+function groupValue(entry, groupBy, column) {
+  if (column) {
+    const value = entry.record[column.header]
+    if (value === undefined || value === null || String(value).trim() === "") {
+      return "(пусто)"
+    }
+    return String(value)
+  }
+  const value = entry.fields[groupBy]
+  if (value === undefined || value === null || String(value).trim() === "") {
+    return "(пусто)"
+  }
+  return String(value)
+}
+
+export function summarizeDaily(table, args) {
+  const groupBy = optionalText(args, "group_by")
+  if (!groupBy) {
+    throw new Error("нужен group_by: category, type, month, week или заголовок колонки")
+  }
+  let column = null
+  if (!GROUP_FIELDS.has(groupBy)) {
+    column = columnByHeader(table, groupBy)
+    if (!column) {
+      throw new Error(`group_by должен быть category, type, month, week или заголовком колонки. Заголовки: ${table.headers.join(", ")}`)
+    }
+  } else {
+    requireMappedField(table, groupBy)
+  }
+  const matched = filterDailyRecords(table, args)
+  const groups = new Map()
+  let skippedAmount = 0
+  for (const entry of matched) {
+    const key = groupValue(entry, groupBy, column)
+    const current = groups.get(key) || { key, sum: 0, count: 0 }
+    current.count += 1
+    const amount = entry.fields.amount
+    if (typeof amount === "number") {
+      current.sum += amount
+    } else {
+      skippedAmount += 1
+    }
+    groups.set(key, current)
+  }
+  const listed = [...groups.values()].sort((left, right) => right.sum - left.sum || left.key.localeCompare(right.key, "ru"))
+  const total = listed.reduce((sum, group) => sum + group.sum, 0)
+  return {
+    group_by: groupBy,
+    groups: listed.map((group) => ({ key: group.key, sum: group.sum, count: group.count })),
+    total: { sum: total, count: matched.length },
+    skipped_amount: skippedAmount,
+    range_capped: table.rangeCapped,
+    columns: table.columns,
+  }
+}
+
+function spreadsheetUrl() {
+  const id = spreadsheetId()
+  return { url: `https://docs.google.com/spreadsheets/d/${id}` }
+}
+
+async function loadDaily() {
+  const listed = await sheetsFetch(
+    `/values/${encodeURIComponent(DAILY_RANGE)}?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER`,
+  )
+  return tableFromGrid(listed.values || [])
+}
+
+export function queryDailyTable(table, args) {
+  const matched = filterDailyRecords(table, args)
+  let limit = QUERY_LIMIT
+  if (args.limit !== undefined && args.limit !== null && args.limit !== "") {
+    const parsed = typeof args.limit === "number" ? args.limit : Number(args.limit)
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > QUERY_LIMIT) {
+      throw new Error(`limit — целое число от 1 до ${QUERY_LIMIT}`)
+    }
+    limit = parsed
+  }
+  return {
+    columns: table.columns,
+    rows: matched.slice(0, limit).map((entry) => entry.record),
+    matched: matched.length,
+    returned: Math.min(matched.length, limit),
+    truncated: matched.length > limit,
+    range_capped: table.rangeCapped,
+  }
+}
+
+async function queryDaily(args) {
+  return queryDailyTable(await loadDaily(), args)
+}
+
+async function summaryDaily(args) {
+  return summarizeDaily(await loadDaily(), args)
+}
+
+function monthlyFieldForHeader(header) {
+  for (const field of MONTHLY_FIELD_ORDER) {
+    if (MONTHLY_FIELDS[field].some((alias) => headerMatches(header, alias))) {
+      return field
+    }
+  }
+  return null
+}
+
+function monthNameFromLabel(value) {
+  const text = String(value || "").trim()
+  if (!text) {
+    return null
+  }
+  return MONTH_NAMES.find((name) => sameText(name, text)) || null
+}
+
+function monthNameFromValue(value) {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 12) {
+    return MONTH_NAMES[value - 1]
+  }
+  if (typeof value === "string" && /^\d{1,2}$/.test(value.trim())) {
+    return monthNameFromValue(Number(value.trim()))
+  }
+  return monthNameFromLabel(value)
+}
+
+function monthArg(value) {
+  if (value === undefined || value === null || value === "") {
+    return null
+  }
+  const name = monthNameFromValue(value)
+  if (!name) {
+    throw new Error("month — название месяца или число от 1 до 12")
+  }
+  return name
+}
+
+function monthlyCell(field, value) {
+  if (value === undefined || value === null || value === "") {
+    return null
+  }
+  if (field === "plan" || field === "fact" || field === "left") {
+    return cellAmount(value)
+  }
+  if (field === "month") {
+    return monthNameFromValue(value) || String(value).trim()
+  }
+  return value
+}
+
+function monthlyRecord(row, kind, data) {
+  const record = { row, kind }
+  for (const key of ["year", "month", "category", "plan", "fact", "left"]) {
+    if (data[key] !== undefined && data[key] !== null && data[key] !== "") {
+      record[key] = data[key]
+    }
+  }
+  for (const [key, value] of Object.entries(data.extra || {})) {
+    record[key] = value
+  }
+  return record
+}
+
+export function tableFromMonthlyGrid(grid) {
+  const rows = grid || []
+  const rowIsHeader = (row) => (row || []).some((cell) => monthlyFieldForHeader(cell) !== null)
+  let headerIndex = 0
+  if (!rowIsHeader(rows[0]) && rowIsHeader(rows[1])) {
+    headerIndex = 1
+  }
+  const headerRow = rows[headerIndex] || []
+  const width = rows.reduce((max, row) => Math.max(max, (row || []).length), 0)
+  const columns = []
+  const usedFields = new Set()
+  for (let index = 0; index < width; index += 1) {
+    const raw = String(headerRow[index] || "").trim()
+    let field = monthlyFieldForHeader(raw)
+    if (field && usedFields.has(field)) {
+      field = null
+    }
+    if (field) {
+      usedFields.add(field)
+    }
+    columns.push({ header: raw || columnLetter(index), field })
+  }
+  const categoryIndex = columns.findIndex((column) => column.field === "category")
+  const labelIndex = categoryIndex === -1 ? 0 : categoryIndex
+  let currentMonth = null
+  let currentYear = null
+  const records = []
+  for (let index = headerIndex + 1; index < rows.length; index += 1) {
+    const source = rows[index] || []
+    const filled = source.some((cell) => cell !== undefined && cell !== null && String(cell).trim() !== "")
+    if (!filled) {
+      continue
+    }
+    const label = String(source[labelIndex] || "").trim()
+    const fields = {}
+    const extra = {}
+    for (let column = 0; column < columns.length; column += 1) {
+      if (column === labelIndex) {
+        continue
+      }
+      const shown = monthlyCell(columns[column].field, source[column])
+      if (shown === null) {
+        continue
+      }
+      if (columns[column].field) {
+        fields[columns[column].field] = shown
+      } else {
+        extra[columns[column].header] = shown
+      }
+    }
+    const named = {
+      plan: fields.plan,
+      fact: fields.fact,
+      left: fields.left,
+    }
+    if (/^\d{4}$/.test(label) && !fields.month) {
+      currentYear = label
+      records.push(monthlyRecord(index + 1, "year", { year: currentYear, extra }))
+      continue
+    }
+    const sectionMonth = monthNameFromLabel(label)
+    if (sectionMonth && !fields.month) {
+      currentMonth = sectionMonth
+      records.push(monthlyRecord(index + 1, "month", { year: currentYear, month: currentMonth, ...named, extra }))
+      continue
+    }
+    const rowMonth = fields.month || currentMonth
+    if (!label) {
+      records.push(monthlyRecord(index + 1, "total", { year: currentYear, month: rowMonth, ...named, extra }))
+      continue
+    }
+    records.push(monthlyRecord(index + 1, "category", {
+      year: currentYear,
+      month: rowMonth,
+      category: label,
+      ...named,
+      extra,
+    }))
+  }
+  return {
+    columns,
+    headers: columns.map((column) => column.header),
+    records,
+    rangeCapped: rows.length >= MONTHLY_ROW_CAP + 1,
+  }
+}
+
+function monthlyColumnValue(record, column) {
+  if (column.field && record[column.field] !== undefined) {
+    return record[column.field]
+  }
+  return record[column.header]
+}
+
+export function filterMonthlyRecords(table, args) {
+  const month = monthArg(args.month)
+  const category = optionalText(args, "category")
+  const kind = optionalText(args, "kind")
+  if (kind && !MONTHLY_KINDS.has(kind)) {
+    throw new Error("kind: category, month, total или year")
+  }
+  const columnName = optionalText(args, "column")
+  const equals = optionalText(args, "equals")
+  if (columnName && !equals) {
+    throw new Error("вместе с column нужен equals")
+  }
+  if (equals && !columnName) {
+    throw new Error("вместе с equals нужен column")
+  }
+  const column = columnName ? table.columns.find((item) => sameText(item.header, columnName)) : null
+  if (columnName && !column) {
+    throw new Error(`на Monthly нет колонки «${columnName}». Заголовки: ${table.headers.join(", ")}`)
+  }
+  return table.records.filter((record) => {
+    if (month && !sameText(record.month || "", month)) {
+      return false
+    }
+    if (category && !sameText(record.category || "", category)) {
+      return false
+    }
+    if (kind && record.kind !== kind) {
+      return false
+    }
+    if (column) {
+      const value = monthlyColumnValue(record, column)
+      if (value === undefined || !sameText(value, equals)) {
+        return false
+      }
+    }
+    return true
+  })
+}
+
+function takeRowLimit(args) {
+  if (args.limit === undefined || args.limit === null || args.limit === "") {
+    return QUERY_LIMIT
+  }
+  const parsed = typeof args.limit === "number" ? args.limit : Number(args.limit)
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > QUERY_LIMIT) {
+    throw new Error(`limit — целое число от 1 до ${QUERY_LIMIT}`)
+  }
+  return parsed
+}
+
+export function queryMonthlyTable(table, args) {
+  const matched = filterMonthlyRecords(table, args)
+  const limit = takeRowLimit(args)
+  return {
+    columns: table.columns,
+    rows: matched.slice(0, limit),
+    matched: matched.length,
+    returned: Math.min(matched.length, limit),
+    truncated: matched.length > limit,
+    range_capped: table.rangeCapped,
+  }
+}
+
+function addAmount(bucket, field, present, value) {
+  if (!present) {
+    return
+  }
+  if (typeof value === "number") {
+    bucket[field] += value
+    return
+  }
+  bucket.skipped += 1
+}
+
+export function summarizeMonthly(table, args) {
+  const groupBy = optionalText(args, "group_by")
+  if (!groupBy) {
+    throw new Error("нужен group_by: month, category или заголовок колонки")
+  }
+  const matched = filterMonthlyRecords(table, args)
+  let source = matched.filter((record) => record.kind === "category")
+  let usedMonthTotals = false
+  if (source.length === 0) {
+    source = matched.filter((record) => record.kind === "month")
+    usedMonthTotals = source.length > 0
+  }
+  const hasPlan = table.columns.some((column) => column.field === "plan")
+  const hasFact = table.columns.some((column) => column.field === "fact")
+  const hasLeft = table.columns.some((column) => column.field === "left")
+  let column = null
+  if (groupBy !== "month" && groupBy !== "category") {
+    column = table.columns.find((item) => sameText(item.header, groupBy)) || null
+    if (!column) {
+      throw new Error(`group_by должен быть month, category или заголовком колонки. Заголовки: ${table.headers.join(", ")}`)
+    }
+  }
+  const groups = new Map()
+  for (const record of source) {
+    let key = "(пусто)"
+    if (groupBy === "month") {
+      key = record.month ? String(record.month) : "(пусто)"
+    } else if (groupBy === "category") {
+      key = record.category ? String(record.category) : "(пусто)"
+    } else {
+      const value = monthlyColumnValue(record, column)
+      key = value === undefined || value === null || String(value).trim() === "" ? "(пусто)" : String(value)
+    }
+    const current = groups.get(key) || { key, count: 0, plan: 0, fact: 0, left: 0, skipped: 0 }
+    current.count += 1
+    addAmount(current, "plan", hasPlan, record.plan)
+    addAmount(current, "fact", hasFact, record.fact)
+    addAmount(current, "left", hasLeft, record.left)
+    groups.set(key, current)
+  }
+  const listed = [...groups.values()].sort((left, right) => right.fact - left.fact || left.key.localeCompare(right.key, "ru"))
+  const finish = (bucket) => {
+    const item = { key: bucket.key, count: bucket.count }
+    if (hasPlan) {
+      item.plan = bucket.plan
+    }
+    if (hasFact) {
+      item.fact = bucket.fact
+    }
+    if (hasPlan && hasFact) {
+      item.delta = bucket.plan - bucket.fact
+    }
+    if (hasLeft) {
+      item.left = bucket.left
+    }
+    return item
+  }
+  const totalBucket = { key: "", count: 0, plan: 0, fact: 0, left: 0, skipped: 0 }
+  for (const bucket of listed) {
+    totalBucket.count += bucket.count
+    totalBucket.plan += bucket.plan
+    totalBucket.fact += bucket.fact
+    totalBucket.left += bucket.left
+    totalBucket.skipped += bucket.skipped
+  }
+  const total = finish(totalBucket)
+  delete total.key
+  return {
+    group_by: groupBy,
+    groups: listed.map(finish),
+    total,
+    skipped_amount: totalBucket.skipped,
+    used_month_totals: usedMonthTotals,
+    range_capped: table.rangeCapped,
+    columns: table.columns,
+  }
+}
+
+async function loadMonthly() {
+  const listed = await sheetsFetch(
+    `/values/${encodeURIComponent(MONTHLY_RANGE)}?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER`,
+  )
+  return tableFromMonthlyGrid(listed.values || [])
+}
+
+async function queryMonthly(args) {
+  return queryMonthlyTable(await loadMonthly(), args)
+}
+
+async function summaryMonthly(args) {
+  return summarizeMonthly(await loadMonthly(), args)
 }
 
 async function weekLeft() {
@@ -228,6 +900,83 @@ const tools = [
       properties: {},
     },
   },
+  {
+    name: "sheets_spreadsheet_url",
+    description:
+      "Возвращает ссылку на таблицу бюджета. Адрес брать только отсюда, в vault его нет.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "sheets_query_daily",
+    description:
+      "Читает строки листа Daily. Фильтры необязательны: date_from и date_to в виде YYYY-MM-DD, category и type — текст заголовков «категория» и «тип». column и equals фильтруют любую колонку по точному значению. В ответе не больше 200 строк. Если truncated=true, выборка обрезана. Суммы, которых нет в ответе, не выдумывать.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        date_from: { type: "string", description: "Начало периода, YYYY-MM-DD" },
+        date_to: { type: "string", description: "Конец периода, YYYY-MM-DD" },
+        category: { type: "string", description: "Категория, как в колонке" },
+        type: { type: "string", description: "Тип траты, как в колонке" },
+        column: { type: "string", description: "Заголовок любой колонки Daily" },
+        equals: { type: "string", description: "Точное значение этой колонки" },
+        limit: { type: "integer", description: "Сколько строк вернуть, от 1 до 200" },
+      },
+    },
+  },
+  {
+    name: "sheets_summary_daily",
+    description:
+      "Суммы и число строк Daily. group_by: category, type, month, week или точный заголовок колонки. Те же фильтры, что у sheets_query_daily. Если skipped_amount больше нуля, часть строк без числа в сумме. Число, которого в ответе нет, не выдумывать.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        group_by: { type: "string", description: "category, type, month, week или заголовок колонки" },
+        date_from: { type: "string", description: "Начало периода, YYYY-MM-DD" },
+        date_to: { type: "string", description: "Конец периода, YYYY-MM-DD" },
+        category: { type: "string", description: "Категория, как в колонке" },
+        type: { type: "string", description: "Тип траты, как в колонке" },
+        column: { type: "string", description: "Заголовок любой колонки Daily" },
+        equals: { type: "string", description: "Точное значение этой колонки" },
+      },
+      required: ["group_by"],
+    },
+  },
+  {
+    name: "sheets_query_monthly",
+    description:
+      "Читает лист Monthly: план, факт и остаток по категориям. Месяцы в первой колонке — секции. month — название или число 1–12, category — имя категории. kind: category (строка категории), month (итог секции), total (строка без имени), year (год). В ответе не больше 200 строк. Число, которого нет в ответе, не выдумывать.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        month: { type: "string", description: "Месяц: название или число 1–12" },
+        category: { type: "string", description: "Категория, как в листе" },
+        kind: { type: "string", description: "category, month, total или year" },
+        column: { type: "string", description: "Заголовок любой колонки Monthly" },
+        equals: { type: "string", description: "Точное значение этой колонки" },
+        limit: { type: "integer", description: "Сколько строк вернуть, от 1 до 200" },
+      },
+    },
+  },
+  {
+    name: "sheets_summary_monthly",
+    description:
+      "Сводка Monthly. group_by: month, category или заголовок колонки. Складывает строки категорий. Итог секции месяца в сумму не входит, чтобы план и факт не удвоились. Если категорийных строк нет, used_month_totals=true и сложены итоги секций. delta = план − факт, это расчёт инструмента. Те же фильтры, что у sheets_query_monthly, кроме limit.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        group_by: { type: "string", description: "month, category или заголовок колонки" },
+        month: { type: "string", description: "Месяц: название или число 1–12" },
+        category: { type: "string", description: "Категория, как в листе" },
+        kind: { type: "string", description: "category, month, total или year" },
+        column: { type: "string", description: "Заголовок любой колонки Monthly" },
+        equals: { type: "string", description: "Точное значение этой колонки" },
+      },
+      required: ["group_by"],
+    },
+  },
 ]
 
 function toolResult(payload, isError) {
@@ -243,6 +992,21 @@ async function callTool(name, args) {
   }
   if (name === "sheets_week_left") {
     return toolResult(await weekLeft(), false)
+  }
+  if (name === "sheets_spreadsheet_url") {
+    return toolResult(spreadsheetUrl(), false)
+  }
+  if (name === "sheets_query_daily") {
+    return toolResult(await queryDaily(args), false)
+  }
+  if (name === "sheets_summary_daily") {
+    return toolResult(await summaryDaily(args), false)
+  }
+  if (name === "sheets_query_monthly") {
+    return toolResult(await queryMonthly(args), false)
+  }
+  if (name === "sheets_summary_monthly") {
+    return toolResult(await summaryMonthly(args), false)
   }
   return toolResult({ error: `неизвестный инструмент ${name}` }, true)
 }
@@ -326,4 +1090,14 @@ function serveStdio() {
   })
 }
 
-serveStdio()
+function isDirectRun() {
+  const entry = process.argv[1]
+  if (!entry) {
+    return false
+  }
+  return import.meta.url === pathToFileURL(entry).href
+}
+
+if (isDirectRun()) {
+  serveStdio()
+}
